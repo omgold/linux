@@ -6,13 +6,17 @@
 
 use crate::{
     bindings,
+    error::{self, Result},
     str::CStr,
     types::{ARef, AlwaysRefCounted, Opaque, RefCounted},
+    subsys::get_subsys_by_class_name,
 };
 use core::{fmt, ptr};
 
 #[cfg(CONFIG_PRINTK)]
 use crate::c_str;
+use core::ffi;
+use core::ptr::NonNull;
 
 /// A reference-counted device.
 ///
@@ -58,6 +62,45 @@ impl Device {
     pub unsafe fn get_device(ptr: *mut bindings::device) -> ARef<Self> {
         // SAFETY: By the safety requirements ptr is valid
         unsafe { Self::as_ref(ptr) }.into()
+    }
+
+    pub fn from_major_minor(class: &CStr, major: ffi::c_uint, minor: ffi::c_uint) -> Result<ARef<Self>> {
+        let device: bindings::dev_t = major << bindings::MINORBITS | minor;
+        Self::from_devt(class, device)
+    }
+
+    pub fn from_devt(class: &CStr, device: bindings::dev_t) -> Result<ARef<Self>> {
+        let subsys =
+	    // SAFETY: TODO
+            get_subsys_by_class_name(class)?;
+	// SAFETY: TODO
+        let device = unsafe {
+            bindings::class_find_device(
+                subsys.class(),
+                ptr::null(),
+                &device as *const _ as *const _,
+                Some(bindings::device_match_devt),
+            )
+        };
+	// SAFETY: TODO
+        Ok(unsafe { Self::get_device(device) })
+    }
+
+    pub fn from_name(class: &CStr, name: &CStr) -> Result<ARef<Self>> {
+        let subsys =
+            // SAFETY: TODO
+            get_subsys_by_class_name(class)?;
+	// SAFETY: TODO
+        let device = unsafe {
+            bindings::class_find_device(
+                subsys.class(),
+                ptr::null(),
+                name.as_ptr() as *const _,
+                Some(bindings::device_match_name),
+            )
+        };
+	// SAFETY: TODO
+        Ok(unsafe { Self::get_device(device) })
     }
 
     /// Obtain the raw `struct device *`.
@@ -421,4 +464,167 @@ macro_rules! dev_info {
 #[macro_export]
 macro_rules! dev_dbg {
     ($($f:tt)*) => { $crate::dev_printk!(pr_dbg, $($f)*); }
+}
+
+pub trait DeviceType {
+    type RawType;
+    unsafe fn as_generic(device: *const Self::RawType) -> NonNull<bindings::device>;
+    unsafe fn as_typed(device: *const bindings::device) -> NonNull<Self::RawType>;
+    unsafe fn is_type(device: *const bindings::device) -> bool;
+}
+
+/// A typed device (`struct typed_device`).
+#[repr(transparent)]
+pub struct TypedDevice<T: DeviceType>(Opaque<T::RawType>);
+
+impl<T: DeviceType> TypedDevice<T> {
+
+    pub fn from_major_minor(class: &CStr, major: ffi::c_uint, minor: ffi::c_uint) -> Result<ARef<Self>> {
+        Device::from_major_minor(class, major, minor)?.try_into().or(Err(error::code::EINVAL))
+    }
+
+    pub fn from_devt(class: &CStr, device: bindings::dev_t) -> Result<ARef<Self>> {
+        Device::from_devt(class, device)?.try_into().or(Err(error::code::EINVAL))
+    }
+
+    pub fn from_name(class: &CStr, name: &CStr) -> Result<ARef<Self>> {
+        Device::from_name(class, name)?.try_into().or(Err(error::code::EINVAL))
+    }
+
+    unsafe fn from_generic_ptr(device: *mut bindings::device) -> Result<ARef<Self>> {
+        match NonNull::new(device) {
+            None => Err(error::code::ENODEV),
+	    // SAFETY: TODO
+            Some(device) => match unsafe { T::is_type(device.as_ptr()) } {
+		// SAFETY: TODO
+                true => Ok(unsafe { Self::from_raw(T::as_typed(device.as_ptr()).as_ptr()) }),
+                false => Err(error::code::EINVAL),
+            },
+        }
+    }
+
+    unsafe fn from_raw(device: *mut T::RawType) -> ARef<Self> {
+	// SAFETY: TODO
+        unsafe { Self::as_ref(device) }.into()
+    }
+
+    pub(crate) fn as_raw(&self) -> *mut T::RawType {
+        self.0.get()
+    }
+
+    pub(crate) fn as_raw_ref(&self) -> &T::RawType {
+	// SAFETY: TODO
+        unsafe { &*self.0.get() }
+    }
+
+    /// Convert a raw C `struct device` pointer to a `&'a Device`.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure that `ptr` is valid, non-null, and has a non-zero reference count,
+    /// i.e. it must be ensured that the reference count of the C `struct device` `ptr` points to
+    /// can't drop to zero, for the duration of this function call and the entire duration when the
+    /// returned reference exists.
+    unsafe fn as_ref<'a>(ptr: *mut T::RawType) -> &'a Self {
+        // SAFETY: Guaranteed by the safety requirements of the function.
+        unsafe { &*ptr.cast() }
+    }
+}
+
+// SAFETY: Instances of `Device` are reference-counted.
+unsafe impl<T: DeviceType> RefCounted for TypedDevice<T> {
+    fn inc_ref(&self) {
+        // SAFETY: The existence of a shared reference guarantees that the refcount is non-zero.
+        unsafe { bindings::get_device(T::as_generic(self.as_raw()).as_ptr()) };
+    }
+
+    unsafe fn dec_ref(obj: NonNull<Self>) {
+        // SAFETY: The safety requirements guarantee that the refcount is non-zero.
+        unsafe { bindings::put_device(T::as_generic(obj.as_ref().as_raw()).as_ptr()) }
+    }
+}
+
+// SAFETY: TODO
+unsafe impl<T: DeviceType> AlwaysRefCounted for TypedDevice<T> {}
+
+// SAFETY: As by the type invariant `TypedDevice` can be sent to any thread.
+unsafe impl<T: DeviceType> Send for TypedDevice<T> {}
+
+// SAFETY: `Device` can be shared among threads because all immutable methods are protected by the
+// synchronization in `struct device`.
+unsafe impl<T: DeviceType> Sync for TypedDevice<T> {}
+
+impl<T: DeviceType> From<ARef<TypedDevice<T>>> for ARef<Device> {
+    fn from(this: ARef<TypedDevice<T>>) -> Self {
+	// SAFETY: TODO
+        unsafe {
+	    Device::get_device(T::as_generic(ARef::into_raw(this).as_ref().as_raw()).as_ptr())
+	}
+    }
+}
+
+impl<T: DeviceType> From<&TypedDevice<T>> for &Device {
+    fn from(this: &TypedDevice<T>) -> Self {
+	// SAFETY: TODO
+        unsafe { Device::as_ref(T::as_generic(this.as_raw()).as_ptr()) }
+    }
+}
+
+impl<C: DeviceType> TryFrom<ARef<Device>> for ARef<TypedDevice<C>> {
+    type Error = ARef<Device>;
+    fn try_from(device: ARef<Device>) -> Result<Self, ARef<Device>> {
+        let device = device.as_raw();
+	// SAFETY: TODO
+        match unsafe { TypedDevice::<C>::from_generic_ptr(device) } {
+            Ok(device) => Ok(device),
+	    // SAFETY: TODO
+            Err(_) => Err(unsafe { Device::get_device(device) }),
+        }
+    }
+}
+
+/// Helper to implement a [`DeviceType`]
+///
+/// Example:
+/// ```
+/// use kernel::impl_device_type;
+///
+/// impl_device_type!(BlockDeviceType, bd_device, kernel::bindings::block_device,
+///     |device: *const kernel::bindings::device| {
+///         unsafe { &kernel::bindings::block_class as *const _ == (*device).class }
+///     }
+/// );
+/// ```
+#[macro_export]
+macro_rules! impl_device_type {
+    ($name:ident, $field:ident, $raw_type:path, $is_type:expr) => {
+        pub struct $name;
+
+        impl $crate::device::DeviceType for $name {
+            type RawType = $raw_type;
+            unsafe fn as_typed(
+                device: *const $crate::bindings::device,
+            ) -> core::ptr::NonNull<Self::RawType> {
+		// SAFETY: TODO
+                unsafe {
+                    core::ptr::NonNull::new_unchecked($crate::container_of!(
+                        device, $raw_type, $field
+                    ) as *mut Self::RawType)
+                }
+            }
+            unsafe fn as_generic(
+                device: *const Self::RawType,
+            ) -> core::ptr::NonNull<$crate::bindings::device> {
+		// SAFETY: TODO
+                unsafe {
+                    core::ptr::NonNull::new_unchecked(
+                        &raw const (*device).$field as *mut _,
+                    )
+                }
+            }
+            unsafe fn is_type(device: *const $crate::bindings::device) -> bool {
+                $is_type(device)
+            }
+        }
+    };
 }
