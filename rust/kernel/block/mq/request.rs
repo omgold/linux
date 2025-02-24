@@ -17,6 +17,7 @@ use crate::{
 use core::{
     ffi::c_void,
     marker::PhantomData,
+    mem,
     ptr::{addr_of_mut, NonNull},
     sync::atomic::Ordering,
 };
@@ -420,6 +421,33 @@ impl<T: Operations> URef<Request<T>> {
         // `ARef`s pointing to this request. Therefore it is safe to hand it
         // back to the block layer.
         unsafe { bindings::blk_mq_end_request(request_ptr, status) };
+    }
+
+}
+
+impl<T: Operations> ARef<Request<T>> {
+    pub fn into_unique_or_drop(self) -> Option<UniqueRef<Request<T>>> {
+	let mut refcount = self.wrapper_ref().refcount().as_atomic().load(Ordering::Relaxed);
+	loop {
+            let refcount_new = if refcount == 2 { 0 } else { refcount-1 };
+	    refcount = match self.wrapper_ref().refcount().as_atomic().compare_exchange(
+		refcount,
+		refcount_new,
+		Ordering::Acquire,
+		Ordering::Relaxed,
+	    ) {
+		Ok(_refcount) => {
+		    break;
+		}
+		Err(refcount) => refcount
+	    }
+	}
+	if refcount == 2 {
+	    Some(unsafe{ UniqueRef::from_raw(ARef::into_raw(self)) })
+	} else {
+	    mem::forget(self);
+	    None
+	}
     }
 }
 
