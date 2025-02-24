@@ -405,17 +405,21 @@ impl<T: Operations> URef<Request<T>> {
 
     /// Notify the block layer that the request has been completed without errors.
     ///
-    /// This function will return [`Err`] if `this` is not the only [`ARef`]
-    /// referencing the request.
     pub fn end_ok(self) {
+        self.end(bindings::BLK_STS_OK as _)
+    }
+
+    /// Notify the block layer that the request has been completed with status `status`.
+    ///
+    pub fn end(self, status: bindings::blk_status_t) {
         let request_ptr = self.0.get().cast();
         core::mem::forget(self);
 
-        // SAFETY: By type invariant, `this.0` was a valid `struct request`. The
-        // success of the call to `try_set_end` guarantees that there are no
+        // SAFETY: By type invariant, `this.0` was a valid `struct request`.
+        // As it got passed through an URef it is guaranteed that there are no
         // `ARef`s pointing to this request. Therefore it is safe to hand it
         // back to the block layer.
-        unsafe { bindings::blk_mq_end_request(request_ptr, bindings::BLK_STS_OK as _) };
+        unsafe { bindings::blk_mq_end_request(request_ptr, status) };
     }
 }
 
