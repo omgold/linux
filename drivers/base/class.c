@@ -645,6 +645,10 @@ bool class_is_registered(const struct class *class)
 }
 EXPORT_SYMBOL_GPL(class_is_registered);
 
+struct kset* get_class_kset(void) {
+    return class_kset;
+}
+
 int __init classes_init(void)
 {
 	class_kset = kset_create_and_add("class", NULL, NULL);
