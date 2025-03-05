@@ -83,6 +83,7 @@ mod static_assert;
 #[doc(hidden)]
 pub mod std_vendor;
 pub mod str;
+pub mod subsys;
 pub mod sync;
 pub mod task;
 pub mod time;
