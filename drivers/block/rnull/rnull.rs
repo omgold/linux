@@ -29,7 +29,7 @@ use kernel::{
         hrtimer::{HrTimerCallback, HrTimerPointer, HrTimerRestart},
         Ktime,
     },
-    types::{ARef, BorrowIterator, Owned, URef, UniqueRefCounted},
+    types::{ARef, BorrowIterator, OwnableRefCounted, Owned},
     xarray::XArray,
     CacheAligned,
 };
@@ -290,7 +290,7 @@ impl HrTimerCallback for Pdu {
     type CallbackTargetParameter<'a> = ARef<mq::Request<NullBlkDevice>>;
 
     fn run(this: Self::CallbackTargetParameter<'_>) -> HrTimerRestart {
-        UniqueRefCounted::try_shared_to_unique(this)
+        OwnableRefCounted::try_from_shared(this)
             .map_err(|_e| kernel::error::code::EIO)
             .expect("Failed to complete request")
             .end_ok();
@@ -316,7 +316,7 @@ impl Operations for NullBlkDevice {
     #[inline(always)]
     fn queue_rq(
         queue_data: Pin<&QueueData>,
-        mut rq: URef<mq::Request<Self>>,
+        mut rq: Owned<mq::Request<Self>>,
         _is_last: bool,
     ) -> Result {
         if queue_data.memory_backed {
@@ -341,7 +341,7 @@ impl Operations for NullBlkDevice {
             IRQMode::None => rq.end_ok(),
             IRQMode::Soft => mq::Request::complete(rq.into()),
             IRQMode::Timer => {
-                UniqueRefCounted::unique_to_shared(rq)
+                OwnableRefCounted::into_shared(rq)
                     .start(queue_data.completion_time)
                     .dismiss();
             }
@@ -352,7 +352,7 @@ impl Operations for NullBlkDevice {
     fn commit_rqs(_queue_data: Pin<&QueueData>) {}
 
     fn complete(rq: ARef<mq::Request<Self>>) {
-        UniqueRefCounted::try_shared_to_unique(rq)
+        OwnableRefCounted::try_from_shared(rq)
             .map_err(|_e| kernel::error::code::EIO)
             .expect("Failed to complete request")
             .end_ok();
