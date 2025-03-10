@@ -12,7 +12,7 @@ use crate::{
         hrtimer::{HasHrTimer, HrTimer, HrTimerCallback, HrTimerHandle, HrTimerPointer},
         Ktime,
     },
-    types::{ARef, AlwaysRefCounted, Opaque, URef, UniqueRefCounted},
+    types::{ARef, AlwaysRefCounted, Opaque, Owned, Ownable, OwnableRefCounted, RefCounted},
 };
 use core::{
     ffi::c_void,
@@ -132,7 +132,7 @@ impl<T: Operations> Request<T> {
 
     /// Get an iterator over all bio structurs in this request
     #[inline(always)]
-    pub fn bio_iter_mut(&mut self) -> BioIterator<'_> {
+    pub fn bio_iter_mut(self: &mut Owned<Self>) -> BioIterator<'_> {
         BioIterator {
             bio: NonNull::new(unsafe { (*self.0.get()).bio.cast() }),
             _p: PhantomData,
@@ -387,7 +387,7 @@ unsafe impl<T: Operations> RefCounted for Request<T> {
 // from a `&Request` (but this will change in the future).
 unsafe impl<T: Operations> AlwaysRefCounted for Request<T> {}
 
-impl<T: Operations> URef<Request<T>> {
+impl<T: Operations> Owned<Request<T>> {
     /// Notify the block layer that a request is going to be processed now.
     ///
     /// The block layer uses this hook to do proper initializations such as
@@ -417,7 +417,7 @@ impl<T: Operations> URef<Request<T>> {
         core::mem::forget(self);
 
         // SAFETY: By type invariant, `this.0` was a valid `struct request`.
-        // As it got passed through an URef it is guaranteed that there are no
+        // As it got passed through an Owned it is guaranteed that there are no
         // `ARef`s pointing to this request. Therefore it is safe to hand it
         // back to the block layer.
         unsafe { bindings::blk_mq_end_request(request_ptr, status) };
@@ -426,7 +426,7 @@ impl<T: Operations> URef<Request<T>> {
 }
 
 impl<T: Operations> ARef<Request<T>> {
-    pub fn into_unique_or_drop(self) -> Option<UniqueRef<Request<T>>> {
+    pub fn into_unique_or_drop(self) -> Option<Owned<Request<T>>> {
 	let mut refcount = self.wrapper_ref().refcount().as_atomic().load(Ordering::Relaxed);
 	loop {
             let refcount_new = if refcount == 2 { 0 } else { refcount-1 };
@@ -443,7 +443,7 @@ impl<T: Operations> ARef<Request<T>> {
 	    }
 	}
 	if refcount == 2 {
-	    Some(unsafe{ UniqueRef::from_raw(ARef::into_raw(self)) })
+	    Some(unsafe{ Owned::from_raw(ARef::into_raw(self)) })
 	} else {
 	    mem::forget(self);
 	    None
@@ -451,8 +451,8 @@ impl<T: Operations> ARef<Request<T>> {
     }
 }
 
-unsafe impl<T: Operations> UniqueRefCounted for Request<T> {
-    fn try_shared_to_unique(this: ARef<Self>) -> core::result::Result<URef<Self>, ARef<Self>> {
+unsafe impl<T: Operations> OwnableRefCounted for Request<T> {
+    fn try_from_shared(this: ARef<Self>) -> core::result::Result<Owned<Self>, ARef<Self>> {
         // Load acquire to sync with decrement store release to make sure all
         // shared access has ended.
         let updated = this.wrapper_ref().refcount().as_atomic().compare_exchange(
@@ -465,13 +465,13 @@ unsafe impl<T: Operations> UniqueRefCounted for Request<T> {
         match updated {
             Ok(_) => Ok(
                 // SAFETY: We achieved unique ownership above.
-                unsafe { URef::from_raw(ARef::into_raw(this)) },
+                unsafe { Owned::from_raw(ARef::into_raw(this)) },
             ),
             Err(_) => Err(this),
         }
     }
 
-    fn unique_to_shared(this: URef<Self>) -> ARef<Self> {
+    fn into_shared(this: Owned<Self>) -> ARef<Self> {
         // Store release to sync with future increments using load acquire to
         // make sure exclusive access has ended before shared access start.
         #[cfg_attr(not(CONFIG_DEBUG_MISC), allow(unused_variables))]
@@ -483,15 +483,18 @@ unsafe impl<T: Operations> UniqueRefCounted for Request<T> {
 
         #[cfg(CONFIG_DEBUG_MISC)]
         if old != 0 {
-            panic!("Invalid refcount when upgrading `URef<Request<T>>`\n");
+            panic!("Invalid refcount when upgrading `Owned<Request<T>>`\n");
         }
 
         // SAFETY: We incremented the refcount above.
-        unsafe { ARef::from_raw(URef::into_raw(this)) }
+        unsafe { ARef::from_raw(Owned::into_raw(this)) }
     }
 
-    unsafe fn dec_ref(obj: core::ptr::NonNull<Self>) {
-        // SAFETY: The type invariants of `URef` guarantee that `obj` is valid
+}
+
+unsafe impl<T: Operations> Ownable for Request<T> {
+    unsafe fn release(obj: core::ptr::NonNull<Self>) {
+        // SAFETY: The type invariants of `Owned` guarantee that `obj` is valid
         // for read.
         let wrapper_ptr = unsafe { Self::wrapper_ptr(obj.as_ptr()).as_ptr() };
         // SAFETY: The type invariant of `Request` guarantees that the private
@@ -505,7 +508,7 @@ unsafe impl<T: Operations> UniqueRefCounted for Request<T> {
 
         #[cfg(CONFIG_DEBUG_MISC)]
         if old != 0 {
-            panic!("Invalid refcount when dropping `URef<Request<T>>`\n");
+            panic!("Invalid refcount when dropping `Owned<Request<T>>`\n");
         }
     }
 }

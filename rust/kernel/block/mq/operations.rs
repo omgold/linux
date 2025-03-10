@@ -11,7 +11,7 @@ use crate::{
     init::PinInit,
     prelude::*,
     sync::Refcount,
-    types::{ARef, ForeignOwnable, URef},
+    types::{ARef, ForeignOwnable, Owned},
 };
 use core::{marker::PhantomData, ptr::NonNull};
 
@@ -51,7 +51,7 @@ pub trait Operations: Sized {
     /// `false`, the driver is allowed to defer committing the request.
     fn queue_rq(
         queue_data: ForeignBorrowed<'_, Self::QueueData>,
-        rq: URef<Request<Self>>,
+        rq: Owned<Request<Self>>,
         is_last: bool,
     ) -> Result;
 
@@ -121,7 +121,7 @@ impl<T: Operations> OperationsVTable<T> {
         //  - `rq` will be alive until `blk_mq_end_request` is called and is
         //    reference counted by until then.
         let mut rq =
-            unsafe { URef::from_raw(NonNull::<Request<T>>::new_unchecked((*bd).rq.cast())) };
+            unsafe { Owned::from_raw(NonNull::<Request<T>>::new_unchecked((*bd).rq.cast())) };
 
         // SAFETY: `hctx` is valid as required by this function.
         let queue_data = unsafe { (*(*hctx).queue).queuedata };

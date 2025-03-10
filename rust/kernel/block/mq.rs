@@ -63,7 +63,7 @@
 //!     new_mutex,
 //!     prelude::*,
 //!     sync::{Arc, Mutex},
-//!     types::{ARef, URef, UniqueRefCounted, ForeignOwnable},
+//!     types::{ARef, Owned, OwnableRefCounted, ForeignOwnable},
 //! };
 //!
 //! struct MyBlkDevice;
@@ -78,7 +78,7 @@
 //!         kernel::init::zeroed()
 //!     }
 //!
-//!     fn queue_rq(_queue_data: (), rq: URef<Request<Self>>, _is_last: bool) -> Result {
+//!     fn queue_rq(_queue_data: (), rq: Owned<Request<Self>>, _is_last: bool) -> Result {
 //!         rq.end_ok();
 //!         Ok(())
 //!     }
@@ -86,7 +86,7 @@
 //!     fn commit_rqs(_queue_data: ()) {}
 //!
 //!     fn complete(rq: ARef<Request<Self>>) {
-//!         UniqueRefCounted::try_shared_to_unique(rq)
+//!         OwnableRefCounted::try_from_shared(rq)
 //!             .map_err(|_e| kernel::error::code::EIO)
 //!             .expect("Request was not uniqueue\n")
 //!             .end_ok();
